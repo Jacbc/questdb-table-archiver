@@ -1,0 +1,25 @@
+# Default output directories from qdb-export.sh (default: <table>_parquet/)
+*_parquet/
+
+# Merged Parquet output from qdb-merge.sh (default: <input-dir>.parquet)
+*.parquet
+
+# In-flight artifacts left behind by qdb-export.sh
+*.parquet.broken
+*.parquet.err
+
+# Run logs
+*.log
+
+# macOS
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python helper artifacts (just in case)
+__pycache__/
+*.pyc
