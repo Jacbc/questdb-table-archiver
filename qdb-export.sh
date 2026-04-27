@@ -53,7 +53,7 @@ Examples:
   $(basename "$0") --table ais --by month 2025
   $(basename "$0") --table trades --by day 2026-04-27
   $(basename "$0") --table sensors                      # auto-detect everything
-  QDB=http://192.168.4.6:9000 $(basename "$0") -t ais 2024 2025 2026
+  QDB=http://192.168.1.110:9000 $(basename "$0") -t ais 2024 2025 2026
 EOF
 }
 

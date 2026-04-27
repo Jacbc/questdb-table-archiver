@@ -82,7 +82,7 @@ parsing — both are on every macOS and modern Linux box by default).
 ./qdb-export.sh --table trades --by day 2026-04
 
 # Point at a remote QuestDB
-QDB=http://192.168.4.6:9000 ./qdb-export.sh --table ais 2024 2025 2026
+QDB=http://192.168.1.110:9000 ./qdb-export.sh --table ais 2024 2025 2026
 ```
 
 Files are written to `<table>_parquet/<table>_<period>.parquet`, e.g.
@@ -163,18 +163,34 @@ companion `qdb-merge.sh` script. It streams all chunks through DuckDB's
 `COPY` so memory usage stays bounded regardless of total size.
 
 ```bash
-# Default: writes ais_parquet.parquet next to the input dir, zstd-compressed
+# Merge everything in ais_parquet/ -> ais.parquet (zstd)
 ./qdb-merge.sh ais_parquet/
 
+# Merge only 2023 chunks -> ais_2023.parquet
+./qdb-merge.sh -p 2023 ais_parquet/
+
+# Merge only April 2023 -> ais_2023-04.parquet
+./qdb-merge.sh -p 2023-04 ais_parquet/
+
 # Explicit output path
-./qdb-merge.sh ais_parquet/ ais_full.parquet
+./qdb-merge.sh -p 2023 ais_parquet/ ais_archive_2023.parquet
 
-# Different compression
-./qdb-merge.sh -c snappy ais_parquet/ ais_full.parquet
+# Different codec
+./qdb-merge.sh -c snappy ais_parquet/ ais.parquet
 
-# Verify row counts match between inputs and output
+# Sanity-check row counts after merge
 ./qdb-merge.sh --verify ais_parquet/
 ```
+
+The default output filename is derived from the input directory: a
+trailing `_parquet` is stripped, and the `--period` (if any) is appended.
+So `ais_parquet/` produces `ais.parquet`, and `ais_parquet/ -p 2023`
+produces `ais_2023.parquet`.
+
+The `--period` filter matches any chunk filename containing
+`_<period>` — `-p 2023` picks up `ais_2023.parquet`,
+`ais_2023-01.parquet`, `ais_2023-04-15.parquet`, etc. So you can roll
+daily chunks up into yearly archives without re-exporting.
 
 Requires the [DuckDB CLI](https://duckdb.org/docs/installation/)
 (`brew install duckdb` on macOS). Chunk filenames sort chronologically by
