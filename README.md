@@ -197,6 +197,59 @@ Requires the [DuckDB CLI](https://duckdb.org/docs/installation/)
 construction (`<table>_2023-01.parquet < <table>_2023-02.parquet < ...`),
 so the merged file preserves time order without an explicit `ORDER BY`.
 
+## Verifying a merge before deleting the chunks
+
+After running `qdb-merge.sh` you may want to delete the granular chunk
+files to reclaim disk. Before doing that, run `qdb-check.sh` to confirm
+the merged file faithfully represents every row in the chunks. No
+QuestDB connection is needed — it's a purely local comparison via DuckDB.
+
+```bash
+# Compare a merged file against its source dir
+./qdb-check.sh ais_2023.parquet ais_parquet/ -p 2023
+
+# Or pass an explicit glob (must be quoted)
+./qdb-check.sh ais_2023.parquet "ais_parquet/*_2023*.parquet"
+
+# Also diff column names
+./qdb-check.sh --schema ais.parquet ais_parquet/
+```
+
+The script verifies:
+
+1. **Row count** — `count(*)` of merged file == `count(*)` of chunk glob
+2. **Time range** — `min/max(<ts>)` matches between merged and chunks
+3. **Schema** (with `--schema`) — column names match
+
+Exits 0 on full match, 1 on any mismatch. So you can guard a cleanup
+step:
+
+```bash
+./qdb-check.sh ais_2023.parquet ais_parquet/ -p 2023 \
+  && rm ais_parquet/*_2023*.parquet
+```
+
+Example output:
+
+```
+Comparing:
+  merged: ais_2023.parquet  (17.9 GB)
+  chunks: 9 file(s) from 'ais_parquet/*_2023*.parquet'  (29.7 GB)
+
+Counting rows...
+  merged: 842301557 rows
+  chunks: 842301557 rows
+  OK  row counts match
+
+Comparing time range...
+  merged: 2023-01-15T08:12:03.000000Z  ..  2023-12-31T23:59:58.000000Z
+  chunks: 2023-01-15T08:12:03.000000Z  ..  2023-12-31T23:59:58.000000Z
+  OK  ranges match
+
+PASS  merged file faithfully represents the source chunks.
+      Safe to delete the chunk files if you no longer need them.
+```
+
 ## Limitations / not yet implemented
 
 - No compression flag yet — uses QuestDB's server-side default. To
