@@ -145,11 +145,11 @@ MERGED_BYTES=$(filesize "$MERGED")
 if [[ -z "$TS_COL" ]]; then
   TS_COL=$(duckdb -noheader -list -c "
 WITH cols AS (
-  SELECT column_name, data_type
+  SELECT column_name, column_type
   FROM (DESCRIBE SELECT * FROM read_parquet('${MERGED}'))
 ),
 ts AS (
-  SELECT column_name FROM cols WHERE upper(data_type) LIKE 'TIMESTAMP%'
+  SELECT column_name FROM cols WHERE upper(column_type) LIKE 'TIMESTAMP%'
 ),
 preferred AS (
   SELECT column_name, list_position(['ts','time','timestamp','event_time','created_at','dt','date'], lower(column_name)) AS rank
