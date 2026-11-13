@@ -1,0 +1,13 @@
+{
+  "_comment": "Example config for qdb-backup.py. Every table in QuestDB must be listed (or the run exits 3).",
+  "unlisted": "error",
+  "defaults": {"settle_days": 1, "timeout": 280},
+  "tables": [
+    {"table": "trades", "mode": "chunked", "settle_days": 1},
+    {"table": "trades_v2", "mode": "chunked", "prefix": "trades_new", "dir": "v2"},
+    {"table": "sensor_readings", "mode": "chunked", "dir": "sensors", "settle_days": 3, "start": "2024-01"},
+    {"table": "sensor_raw", "mode": "schema"},
+    {"table": "instruments", "mode": "full", "dir": "small"},
+    {"table": "scratch_import.csv", "mode": "skip"}
+  ]
+}

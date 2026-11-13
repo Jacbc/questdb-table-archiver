@@ -20,6 +20,8 @@ OUT_DIR="${OUT_DIR:-}"
 TABLE="${QDB_TABLE:-}"
 TS_COL="${QDB_TS_COL:-}"
 BY="${QDB_BY:-month}"
+PREFIX="${QDB_PREFIX:-}"
+SETTLE_DAYS="${SETTLE_DAYS:-1}"
 
 # ---------- usage -----------------------------------------------------------
 
@@ -33,9 +35,13 @@ Options:
   -t, --table NAME       Table to export                       (env: QDB_TABLE)
   -c, --ts-col NAME      Timestamp column (auto-detected)      (env: QDB_TS_COL)
   -b, --by GRANULARITY   Chunk size: year|month|week|day       (default: month)
-  -o, --out DIR          Output directory                      (default: <table>_parquet)
+  -p, --prefix NAME      File name prefix                      (env: QDB_PREFIX, default: <table>)
+  -o, --out DIR          Output directory                      (default: <prefix>_parquet)
   -u, --url URL          QuestDB base URL                      (env: QDB, default: http://localhost:9000)
       --timeout SECS     Per-chunk curl timeout in seconds     (env: TIMEOUT, default: 280)
+      --settle-days N    A file is final only if it was written at least
+                         N days after its period ended; earlier files
+                         (e.g. the current month) are re-exported   (env: SETTLE_DAYS, default: 1)
   -h, --help             Show this help
 
 Periods:
@@ -53,7 +59,8 @@ Examples:
   $(basename "$0") --table ais --by month 2025
   $(basename "$0") --table trades --by day 2026-04-27
   $(basename "$0") --table sensors                      # auto-detect everything
-  QDB=http://192.168.1.110:9000 $(basename "$0") -t ais 2024 2025 2026
+  $(basename "$0") --table ais_v2 --prefix ais 2026      # table ais_v2 -> ais_parquet/ais_2026-MM.parquet
+  QDB=http://questdb.example:9000 $(basename "$0") -t ais 2024 2025 2026
 EOF
 }
 
@@ -65,9 +72,11 @@ while [[ $# -gt 0 ]]; do
     -t|--table)   TABLE="$2";   shift 2 ;;
     -c|--ts-col)  TS_COL="$2";  shift 2 ;;
     -b|--by)      BY="$2";      shift 2 ;;
+    -p|--prefix)  PREFIX="$2";  shift 2 ;;
     -o|--out)     OUT_DIR="$2"; shift 2 ;;
     -u|--url)     QDB="$2";     shift 2 ;;
     --timeout)    TIMEOUT="$2"; shift 2 ;;
+    --settle-days) SETTLE_DAYS="$2"; shift 2 ;;
     -h|--help)    usage; exit 0 ;;
     --)           shift; PERIODS+=("$@"); break ;;
     -*)           echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -86,7 +95,12 @@ case "$BY" in
   *) echo "Error: --by must be one of: year month week day" >&2; exit 2 ;;
 esac
 
-OUT_DIR="${OUT_DIR:-${TABLE}_parquet}"
+if ! [[ "$SETTLE_DAYS" =~ ^[0-9]+$ ]]; then
+  echo "Error: --settle-days must be a whole number of days" >&2; exit 2
+fi
+
+PREFIX="${PREFIX:-$TABLE}"
+OUT_DIR="${OUT_DIR:-${PREFIX}_parquet}"
 
 # ---------- helpers ---------------------------------------------------------
 
@@ -265,6 +279,32 @@ filesize() {
   stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null || echo 0
 }
 
+# Last-modified time of a file, as epoch seconds.
+filemtime() {
+  stat -f%m "$1" 2>/dev/null || stat -c%Y "$1" 2>/dev/null || echo 0
+}
+
+# End of a period (exclusive), as epoch seconds UTC.
+# YYYY-MM -> first instant of the next month, and so on.
+period_end_epoch() {
+  python3 - "$1" <<'PY'
+import sys, re
+from datetime import datetime, date, time, timedelta, timezone
+
+p = sys.argv[1]
+if re.fullmatch(r'\d{4}', p):
+    end = date(int(p) + 1, 1, 1)
+elif re.fullmatch(r'\d{4}-\d{2}', p):
+    y, m = map(int, p.split('-'))
+    end = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
+elif re.fullmatch(r'\d{4}-W\d{2}', p):
+    end = date.fromisocalendar(int(p[:4]), int(p[6:]), 1) + timedelta(days=7)
+else:
+    end = date.fromisoformat(p) + timedelta(days=1)
+print(int(datetime.combine(end, time(), tzinfo=timezone.utc).timestamp()))
+PY
+}
+
 # Format bytes as human-readable (e.g. "45.2 MB").
 human_bytes() {
   awk -v b="$1" 'BEGIN {
@@ -293,7 +333,8 @@ LAST_DURATION=0
 # Args: $1 = period, $2 = chunk index (e.g. "12"), $3 = total chunks
 fetch_period() {
   local period="$1" idx="$2" total="$3"
-  local out="${OUT_DIR}/${TABLE}_${period}.parquet"
+  local out="${OUT_DIR}/${PREFIX}_${period}.parquet"
+  local part="${out}.part"
   local err="${out}.err"
   local prefix
   prefix=$(printf "[%${#total}d/%d]" "$idx" "$total")
@@ -301,12 +342,21 @@ fetch_period() {
   LAST_SIZE=0
   LAST_DURATION=0
 
+  # A valid file is final only if it was written after its period ended
+  # (plus SETTLE_DAYS for late rows). A file written while the period was
+  # still open, e.g. the current month, is re-exported; the old file stays
+  # in place until the new one has been fetched and checked.
+  local status="ok"
   if is_valid_parquet "$out"; then
     local sz; sz=$(filesize "$out")
-    LAST_SIZE=$sz
-    printf "%s  skip    %-12s %10s  (already complete)\n" \
-      "$prefix" "$period" "$(human_bytes "$sz")"
-    return 0
+    local settled_at=$(( $(period_end_epoch "$period") + SETTLE_DAYS * 86400 ))
+    if (( $(filemtime "$out") >= settled_at )); then
+      LAST_SIZE=$sz
+      printf "%s  skip    %-12s %10s  (already complete)\n" \
+        "$prefix" "$period" "$(human_bytes "$sz")"
+      return 0
+    fi
+    status="updated"
   fi
 
   local sql="SELECT * FROM ${TABLE} WHERE ${TS_COL} IN '${period}'"
@@ -314,44 +364,53 @@ fetch_period() {
   encoded=$(printf '%s' "$sql" | urlencode)
   local url="${QDB}/exp?fmt=parquet&query=${encoded}"
 
-  rm -f "$err"
+  rm -f "$err" "$part"
   local rc=0
   local t0 t1 dur
   t0=$(date +%s)
-  curl -fsS --max-time "$TIMEOUT" -o "$out" "$url" 2> "$err" || rc=$?
+  curl -fsS --max-time "$TIMEOUT" -o "$part" "$url" 2> "$err" || rc=$?
   t1=$(date +%s)
   dur=$((t1 - t0))
   LAST_DURATION=$dur
 
   if (( rc != 0 )); then
+    rm -f "$part"
     printf "%s  FAIL    %-12s            after %s  (curl exit %d; see %s)\n" \
       "$prefix" "$period" "$(human_duration "$dur")" "$rc" "$err"
     return 1
   fi
 
-  if ! is_valid_parquet "$out"; then
-    mv -f "$out" "${out}.broken"
-    printf "%s  BROKEN  %-12s            after %s  (no PAR1 trailer; renamed .broken)\n" \
+  if ! is_valid_parquet "$part"; then
+    mv -f "$part" "${out}.broken"
+    printf "%s  BROKEN  %-12s            after %s  (no PAR1 trailer; saved as .broken)\n" \
       "$prefix" "$period" "$(human_duration "$dur")"
     return 1
   fi
 
-  local size; size=$(filesize "$out")
+  local size; size=$(filesize "$part")
 
   # Schema-only Parquet (no rows) is small. Confirm with a count query and
   # delete if truly empty so the archive doesn't fill with zero-row files.
+  # A failed count is a failure, not an empty period.
   if (( size < 2048 )); then
-    local cnt
-    cnt=$(qdb_exec "SELECT count() FROM ${TABLE} WHERE ${TS_COL} IN '${period}'" \
-          | json_cell 0 0 2>/dev/null || echo 0)
+    local cnt=""
+    cnt=$(qdb_exec "SELECT count() FROM ${TABLE} WHERE ${TS_COL} IN '${period}'" 2>>"$err" \
+          | json_cell 0 0 2>/dev/null) || cnt=""
+    if [[ -z "$cnt" ]]; then
+      rm -f "$part"
+      printf "%s  FAIL    %-12s            (tiny file and the count query failed; see %s)\n" \
+        "$prefix" "$period" "$err"
+      return 1
+    fi
     if [[ "$cnt" == "0" ]]; then
-      rm -f "$out"
+      rm -f "$part" "$err" "$out"
       printf "%s  empty   %-12s            (no rows; deleted)\n" \
         "$prefix" "$period"
       return 2
     fi
   fi
 
+  mv -f "$part" "$out"
   rm -f "$err"
   LAST_SIZE=$size
   local rate=""
@@ -359,8 +418,8 @@ fetch_period() {
     rate=$(awk -v b="$size" -v s="$dur" 'BEGIN { printf "%.1f MB/s", (b/1048576)/s }')
     rate="  ${rate}"
   fi
-  printf "%s  ok      %-12s %10s  in %6s%s\n" \
-    "$prefix" "$period" "$(human_bytes "$size")" "$(human_duration "$dur")" "$rate"
+  printf "%s  %-7s %-12s %10s  in %6s%s\n" \
+    "$prefix" "$status" "$period" "$(human_bytes "$size")" "$(human_duration "$dur")" "$rate"
   return 0
 }
 
@@ -403,7 +462,7 @@ TOTAL_CHUNKS=${#CHUNKS[@]}
 PROGRESS_EVERY="${PROGRESS_EVERY:-10}"
 
 echo
-echo "Exporting ${TOTAL_CHUNKS} chunk(s) of '${TABLE}' to ${OUT_DIR}/ at granularity '${BY}'"
+echo "Exporting ${TOTAL_CHUNKS} chunk(s) of '${TABLE}' to ${OUT_DIR}/${PREFIX}_*.parquet at granularity '${BY}'"
 echo
 
 OK=0; FAIL=0; EMPTY=0
