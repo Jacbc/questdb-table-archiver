@@ -82,11 +82,21 @@ parsing — both are on every macOS and modern Linux box by default).
 ./qdb-export.sh --table trades --by day 2026-04
 
 # Point at a remote QuestDB
-QDB=http://192.168.1.110:9000 ./qdb-export.sh --table ais 2024 2025 2026
+QDB=http://questdb.example:9000 ./qdb-export.sh --table ais 2024 2025 2026
 ```
 
-Files are written to `<table>_parquet/<table>_<period>.parquet`, e.g.
-`ais_parquet/ais_2026-04.parquet`.
+Files are written to `<prefix>_parquet/<prefix>_<period>.parquet`, e.g.
+`ais_parquet/ais_2026-04.parquet`. The prefix defaults to the table name;
+`--prefix` keeps the old file names when a table is renamed:
+
+```bash
+# Table renamed from ais to ais_v2: keep writing ais_parquet/ais_YYYY-MM.parquet
+./qdb-export.sh --table ais_v2 --prefix ais 2026
+```
+
+Export base tables, not views over them: a view adds a layer per query
+and, if it filters or joins, may not pass the time range down to the
+table's partitions.
 
 ## CLI reference
 
@@ -95,9 +105,11 @@ Files are written to `<table>_parquet/<table>_<period>.parquet`, e.g.
 | `-t, --table NAME` | `QDB_TABLE` | *(required)* | Table to export |
 | `-c, --ts-col NAME` | `QDB_TS_COL` | auto-detect (see below) | Timestamp column name |
 | `-b, --by GRANULARITY` | `QDB_BY` | `month` | Chunk size: `year` / `month` / `week` / `day` |
-| `-o, --out DIR` | `OUT_DIR` | `<table>_parquet` | Output directory |
+| `-p, --prefix NAME` | `QDB_PREFIX` | `<table>` | File name prefix |
+| `-o, --out DIR` | `OUT_DIR` | `<prefix>_parquet` | Output directory |
 | `-u, --url URL` | `QDB` | `http://localhost:9000` | QuestDB base URL |
 | `--timeout SECS` | `TIMEOUT` | `280` | Per-chunk curl timeout |
+| `--settle-days N` | `SETTLE_DAYS` | `1` | Days after a period ends before its file counts as final |
 
 ### Period formats
 
@@ -129,19 +141,27 @@ auto-detection lands on — pass `--ts-col` explicitly.
 
 ## Behaviors that matter
 
-- **Resumable.** Existing complete files (verified by `PAR1` trailer) are
-  skipped on rerun, so interrupted runs pick up where they left off.
-- **Self-validating.** Every fetched file is checked for the `PAR1`
-  trailer before being kept. Files that fail the check are renamed
-  `.broken` and re-fetched on the next run.
+- **Resumable.** A file is skipped on rerun when it is complete (`PAR1`
+  trailer) **and** was written at least `--settle-days` after its period
+  ended. So interrupted runs pick up where they left off, and a period
+  exported while still open (e.g. the current month) is re-exported on
+  the next run and shown as `updated`, until a run after it has ended.
+  This uses the file's modification time: copy archives with `rsync -a`
+  or `cp -p`, or a copy made later looks final.
+- **Never leaves a half-written file.** Each chunk downloads to
+  `<file>.part` and replaces the target only after the `PAR1` check, so a
+  failed re-export keeps the previous good file. Files that fail the
+  check are saved as `.broken`.
 - **Empty periods are deleted.** If a period falls outside the data
   range, the response is a tiny schema-only Parquet; the script
   confirms with a `count()` query and removes the file rather than
-  cluttering the archive.
+  cluttering the archive. If that `count()` fails, the chunk is reported
+  as failed instead of empty.
 - **Per-chunk timeout (default 280 s).** A few seconds shy of QuestDB's
   ~5 minute server-side limit, so failures bail fast.
 - **Failed chunks leave a `.err` file** containing curl's stderr next to
   the target path, so you can see what went wrong without rerunning.
+  It is removed when the chunk later succeeds or turns out empty.
 
 ## Reading the output
 
