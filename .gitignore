@@ -4,9 +4,17 @@
 # Merged Parquet output from qdb-merge.sh (default: <input-dir>.parquet)
 *.parquet
 
-# In-flight artifacts left behind by qdb-export.sh
+# In-flight artifacts left behind by qdb-export.sh / qdb-backup.py
 *.parquet.broken
 *.parquet.err
+*.part
+
+# A qdb-backup.py backup run inside the checkout
+BACKUP.json
+SHA256SUMS
+*.manifest.json
+.qdb-backup.lock
+.duckdb-tmp/
 
 # Run logs
 *.log
