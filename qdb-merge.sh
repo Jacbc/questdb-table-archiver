@@ -172,10 +172,24 @@ if [[ -n "$ROW_GROUP_SIZE" ]]; then
   COPY_OPTS="${COPY_OPTS}, ROW_GROUP_SIZE ${ROW_GROUP_SIZE}"
 fi
 
-DUCKDB_GLOB="${IN_DIR}/${GLOB_PATTERN}"
+# Build a SQL list literal of explicit file paths from the bash-resolved
+# array. Avoids relying on DuckDB's own glob expansion, which can fail
+# silently across versions / under sudo / on unusual mounts even when
+# bash's glob succeeds.
+FILE_LIST_SQL="["
+SEP=""
+for f in "${INPUT_FILES[@]}"; do
+  # SQL-escape any single quotes by doubling them (SQL standard).
+  esc="${f//\'/\'\'}"
+  FILE_LIST_SQL+="${SEP}'${esc}'"
+  SEP=", "
+done
+FILE_LIST_SQL+="]"
 
 START=$(date +%s)
-duckdb -c "COPY (SELECT * FROM read_parquet('${DUCKDB_GLOB}')) TO '${OUT_FILE}' (${COPY_OPTS});"
+duckdb <<SQL
+COPY (SELECT * FROM read_parquet(${FILE_LIST_SQL})) TO '${OUT_FILE}' (${COPY_OPTS});
+SQL
 END=$(date +%s)
 DUR=$((END - START))
 
@@ -187,7 +201,10 @@ echo "Wrote $OUT_FILE  ($(human_bytes "$OUT_BYTES"), ratio ${RATIO}x of input) i
 if (( VERIFY )); then
   echo
   echo "Verifying row counts..."
-  IN_ROWS=$(duckdb -noheader -list -c "SELECT count(*) FROM read_parquet('${DUCKDB_GLOB}');" | tr -d ' ')
+  IN_ROWS=$(duckdb -noheader -list <<SQL | tr -d ' '
+SELECT count(*) FROM read_parquet(${FILE_LIST_SQL});
+SQL
+)
   OUT_ROWS=$(duckdb -noheader -list -c "SELECT count(*) FROM read_parquet('${OUT_FILE}');" | tr -d ' ')
   echo "  input:  ${IN_ROWS} rows"
   echo "  output: ${OUT_ROWS} rows"

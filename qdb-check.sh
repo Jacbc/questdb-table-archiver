@@ -140,6 +140,18 @@ for f in "${CHUNK_FILES[@]}"; do
 done
 MERGED_BYTES=$(filesize "$MERGED")
 
+# Build a SQL list literal of the bash-resolved chunk file paths. Avoids
+# relying on DuckDB's own glob expansion, which can fail under sudo / on
+# older DuckDB versions even when bash's glob succeeds.
+CHUNK_LIST_SQL="["
+SEP=""
+for f in "${CHUNK_FILES[@]}"; do
+  esc="${f//\'/\'\'}"
+  CHUNK_LIST_SQL+="${SEP}'${esc}'"
+  SEP=", "
+done
+CHUNK_LIST_SQL+="]"
+
 # ---------- detect timestamp column ----------------------------------------
 
 if [[ -z "$TS_COL" ]]; then
@@ -171,7 +183,7 @@ echo
 
 echo "Counting rows..."
 MERGED_ROWS=$(duck_scalar "SELECT count(*) FROM read_parquet('${MERGED}');")
-CHUNK_ROWS=$(duck_scalar "SELECT count(*) FROM read_parquet('${CHUNKS_GLOB}');")
+CHUNK_ROWS=$(duck_scalar "SELECT count(*) FROM read_parquet(${CHUNK_LIST_SQL});")
 
 printf "  merged: %s rows\n" "$MERGED_ROWS"
 printf "  chunks: %s rows\n" "$CHUNK_ROWS"
@@ -191,8 +203,8 @@ if [[ -n "$TS_COL" ]]; then
   echo "Comparing ${TS_COL} range..."
   MERGED_MIN=$(duck_scalar "SELECT min(${TS_COL}) FROM read_parquet('${MERGED}');")
   MERGED_MAX=$(duck_scalar "SELECT max(${TS_COL}) FROM read_parquet('${MERGED}');")
-  CHUNK_MIN=$(duck_scalar "SELECT min(${TS_COL}) FROM read_parquet('${CHUNKS_GLOB}');")
-  CHUNK_MAX=$(duck_scalar "SELECT max(${TS_COL}) FROM read_parquet('${CHUNKS_GLOB}');")
+  CHUNK_MIN=$(duck_scalar "SELECT min(${TS_COL}) FROM read_parquet(${CHUNK_LIST_SQL});")
+  CHUNK_MAX=$(duck_scalar "SELECT max(${TS_COL}) FROM read_parquet(${CHUNK_LIST_SQL});")
 
   printf "  merged: %s  ..  %s\n" "$MERGED_MIN" "$MERGED_MAX"
   printf "  chunks: %s  ..  %s\n" "$CHUNK_MIN" "$CHUNK_MAX"
@@ -212,7 +224,7 @@ if (( SCHEMA )); then
 SELECT column_name FROM (DESCRIBE SELECT * FROM read_parquet('${MERGED}'))
 ORDER BY column_name;" | sed 's/^ *//;s/ *$//')
   CHUNK_COLS=$(duckdb -noheader -list -c "
-SELECT column_name FROM (DESCRIBE SELECT * FROM read_parquet('${CHUNKS_GLOB}'))
+SELECT column_name FROM (DESCRIBE SELECT * FROM read_parquet(${CHUNK_LIST_SQL}))
 ORDER BY column_name;" | sed 's/^ *//;s/ *$//')
 
   if [[ "$MERGED_COLS" == "$CHUNK_COLS" ]]; then
