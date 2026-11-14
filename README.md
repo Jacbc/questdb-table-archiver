@@ -292,6 +292,33 @@ without it, explicitly: files are then not checked, and existing files are
 adopted by their file time until a later run with DuckDB checks them.
 `merge-year` and `verify --deep` always need it.
 
+### Quick setup
+
+```bash
+./qdb-backup-setup.sh ~/qdb-backup http://questdb.example:9000 [--group sensor_=sensors] [--start 2026-01]
+~/qdb-backup/run-backup.sh --dry-run    # read the plan
+~/qdb-backup/run-backup.sh              # every run after that
+```
+
+The setup script installs a pinned DuckDB into `~/.local/bin` (sha256-checked,
+Linux) if there is none, writes `qdb-backup.config.json` into the backup
+directory with `qdb-backup.py init`, offers to move existing `qdb-export.sh`
+folders (`<prefix>_parquet/` next to the script) into it so their files are
+taken over, and writes `run-backup.sh`. `init` lists every table and picks the
+mode from its definition:
+
+| Table | Mode |
+|---|---|
+| has a TTL | `schema` (a restore would drop rows older than the TTL) |
+| no designated timestamp, or not partitioned | `full` |
+| partitioned, at most `--full-below` rows (100000) | `full` |
+| partitioned, more rows | `chunked`; if a view is exactly `SELECT * FROM <table>` (the name before a rename), its name is the file prefix |
+| materialized view | `skip` |
+
+`--group NAME_PREFIX=DIR` puts matching tables under `DIR/` (e.g. to keep a
+group of tables out of a shared copy), `--start YYYY-MM` sets `start` on the
+chunked tables. Edit the config afterwards as you like.
+
 ```bash
 # back up what changed (run it by hand, or from cron on the backup machine)
 python3 qdb-backup.py run --config backup.json --root /backups/qdb --url http://questdb:9000
