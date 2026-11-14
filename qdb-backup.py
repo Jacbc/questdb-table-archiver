@@ -9,6 +9,7 @@ Subcommands
   verify      check the files of a backup against its manifests (sha256; --deep adds DuckDB fingerprints)
   restore     rebuild a working QuestDB from a backup: tables, data, DEDUP, views, then verify everything
   schema      capture the schema only
+  init        write a config for an existing database (every table, with a mode chosen from its definition)
 
 Requires Python 3.8+ (standard library only) and, for run and merge-year, the DuckDB CLI: it checks every file
 locally against the source (run --no-duckdb skips that, explicitly). QuestDB itself is the restore engine
@@ -1937,6 +1938,83 @@ def restore_chunked(qdb, root, name, man, schema, args, failures):
 # schema
 
 
+def alias_views(views):
+    """{table: view} for views that are exactly `SELECT * FROM table`: the name a table had before a rename (the
+    view keeps old queries working), so its files keep the old names."""
+    out = {}
+    for v, sql in sorted(views.items()):
+        mt = re.match(r'^\s*\(?\s*select\s+\*\s+from\s+"?([A-Za-z0-9_.]+)"?\s*\)?\s*;?\s*$', sql or "", re.I)
+        if mt and mt.group(1) != v:
+            out.setdefault(mt.group(1), v)
+    return out
+
+
+def cmd_init(args):
+    """Write a config for every table in the database. The mode comes from the table's definition:
+    a TTL -> schema (restored rows older than the TTL would be dropped); no designated timestamp, no partitions or
+    at most --full-below rows -> full; otherwise chunked (monthly files). Views are not listed: run captures them."""
+    root = os.path.abspath(args.root)
+    path = os.path.join(root, "qdb-backup.config.json")
+    if os.path.exists(path) and not args.force:
+        raise SystemExit("%s exists; edit it, or pass --force to write it again" % path)
+    groups = []
+    for g in args.group or []:
+        if "=" not in g:
+            raise SystemExit("--group needs NAME_PREFIX=DIR, e.g. --group sensor_=sensors")
+        pre, d = g.split("=", 1)
+        if os.path.isabs(d) or ".." in d.split("/"):
+            raise SystemExit("--group %s: DIR must be relative" % g)
+        groups.append((pre, d))
+    if args.start and not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", args.start):
+        raise SystemExit("--start must be YYYY-MM")
+    qdb = Qdb(args.url)
+    rows = qdb.dicts("SELECT * FROM tables()")
+    try:
+        views = {r["view_name"]: r["view_sql"] for r in qdb.dicts("SELECT view_name, view_sql FROM views()")}
+    except QdbError:
+        views = {}
+    aliases = alias_views(views)
+    tables = []
+    log("%-28s %-8s %-14s %s" % ("table", "mode", "dir", "why"))
+    for r in sorted(rows, key=lambda r: r["table_name"]):
+        name, ttype = r["table_name"], r.get("table_type")
+        if ttype == "V":
+            continue
+        t = {"table": name}
+        d = next((d for pre, d in groups if name.startswith(pre)), ".")
+        if ttype == "M":
+            t["mode"], why = "skip", "materialized view (rebuilt from its base table)"
+        elif to_int(r.get("ttlValue")):
+            t["mode"], why = "schema", "TTL %s %s: restored older rows would be dropped" % (r.get("ttlValue"), r.get("ttlUnit"))
+        elif not r.get("designatedTimestamp") or r.get("partitionBy") in (None, "NONE", "N/A"):
+            t["mode"], why = "full", "no designated timestamp or partitions"
+        else:
+            n = to_int(qdb.rows("SELECT count() FROM %s" % qident(name))[0][0]) or 0
+            if n <= args.full_below:
+                t["mode"], why = "full", "%d rows" % n
+            else:
+                t["mode"], why = "chunked", "%d rows, partitioned by %s" % (n, r.get("partitionBy"))
+                if name in aliases:
+                    t["prefix"] = aliases[name]
+                    why += "; files named %s_* (view %s = SELECT * FROM %s)" % (aliases[name], aliases[name], name)
+                if args.start:
+                    t["start"] = args.start
+        if t["mode"] != "skip" and d != ".":
+            t["dir"] = d
+        tables.append(t)
+        log("%-28s %-8s %-14s %s" % (name, t["mode"], t.get("dir", "."), why))
+    os.makedirs(root, exist_ok=True)
+    cfg = {"_comment": "Written by qdb-backup.py init on %s from %s. Edit freely; every table must stay listed "
+                       "(a new one makes run exit 3)." % (iso_now()[:10], qdb.url),
+           "unlisted": "error", "tables": tables}
+    with open(path, "w") as f:
+        f.write('{\n  "_comment": %s,\n  "unlisted": "error",\n  "tables": [\n    %s\n  ]\n}\n' % (
+            json.dumps(cfg["_comment"], ensure_ascii=False),
+            ",\n    ".join(json.dumps(t, ensure_ascii=False) for t in tables)))
+    log("\nconfig written: %s" % path)
+    return 0
+
+
 def cmd_schema(args):
     cfg = load_config(args.config) if args.config else {"tables": []}
     qdb = Qdb(args.url)
@@ -2012,13 +2090,23 @@ def main(argv=None):
     c.add_argument("--url", default=os.environ.get("QDB", "http://localhost:9000"))
     c.add_argument("--config")
 
+    i = sub.add_parser("init", help="write a config for every table of a database")
+    i.add_argument("--root", required=True, help="backup directory (the config is written there as qdb-backup.config.json)")
+    i.add_argument("--url", default=os.environ.get("QDB", "http://localhost:9000"))
+    i.add_argument("--group", action="append", metavar="NAME_PREFIX=DIR",
+                   help="tables whose name starts with NAME_PREFIX go under DIR (repeatable)")
+    i.add_argument("--start", metavar="YYYY-MM", help="chunked tables: months before this are not backed up")
+    i.add_argument("--full-below", type=int, default=100000, help="partitioned tables up to this many rows are "
+                   "dumped whole (default 100000)")
+    i.add_argument("--force", action="store_true", help="overwrite an existing qdb-backup.config.json")
+
     args = ap.parse_args(argv)
     if not args.cmd:
         ap.print_help()
         return 2
     try:
         return {"run": cmd_run, "merge-year": cmd_merge_year, "verify": cmd_verify, "restore": cmd_restore,
-                "schema": cmd_schema}[args.cmd](args)
+                "schema": cmd_schema, "init": cmd_init}[args.cmd](args)
     except QdbError as e:
         log("ERROR: %s" % e)
         return 1
