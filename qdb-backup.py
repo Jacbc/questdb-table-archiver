@@ -728,8 +728,12 @@ class Lock:
         if fcntl is not None:
             try:
                 fcntl.flock(self.f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                raise SystemExit("another qdb-backup.py is working on %s (lock %s)" % (os.path.dirname(self.path), self.path))
+            except OSError as e:
+                if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+                    raise SystemExit("another qdb-backup.py is working on %s (lock %s)" % (os.path.dirname(self.path), self.path))
+                # e.g. some network shares: no file locks at all
+                log("warning: file locks do not work at %s (%s); make sure only one run uses this directory"
+                    % (os.path.dirname(self.path), e.strerror or e))
         self.f.seek(0)
         self.f.truncate()
         self.f.write("%d %s\n" % (os.getpid(), iso_now()))

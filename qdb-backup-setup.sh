@@ -8,6 +8,7 @@
 #
 # 1. checks python3 >= 3.8 and curl
 # 2. installs a pinned DuckDB CLI into ~/.local/bin (sha256-checked; Linux x86_64/aarch64) unless one is there
+#    (a snap-installed duckdb is not used: snaps are sandboxed away from /mnt and network shares)
 # 3. writes BACKUP_DIR/qdb-backup.config.json with `qdb-backup.py init` (every table, mode chosen from its definition);
 #    an existing qdb-backup.config.json is kept (pass --force to write it again)
 # 4. offers to move existing qdb-export.sh folders (<prefix>_parquet/ next to this script) into BACKUP_DIR, so their
@@ -23,7 +24,7 @@ DUCK_VERSION="v1.4.1"
 SHA256_amd64="3e29952507ebd202e8d0e2678df4490689bfc9c86534e240b541791b969df0e1"
 SHA256_arm64="646f60c92268c441f0095ce855e16528a8539e466da2788649f359be8cbdc8d1"
 
-usage() { sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'; }
 [[ $# -ge 2 && "$1" != -* && "$2" != -* ]] || { usage >&2; exit 2; }
 ROOT="$1"; URL="$2"; shift 2
 die() { echo "setup: $*" >&2; exit 1; }
@@ -37,7 +38,14 @@ echo "QuestDB at $URL answers"
 # ---- 2. DuckDB ----------------------------------------------------------------------------------------------------
 DUCK="${DUCKDB:-}"
 if [[ -z "$DUCK" && -x "$HOME/.local/bin/duckdb" ]]; then DUCK="$HOME/.local/bin/duckdb"; fi
-if [[ -z "$DUCK" ]] && command -v duckdb >/dev/null; then DUCK="$(command -v duckdb)"; fi
+if [[ -z "$DUCK" ]] && command -v duckdb >/dev/null; then
+  DUCK="$(command -v duckdb)"
+  # A snap is sandboxed: it usually cannot read /mnt, /media or network shares. Install the pinned one instead.
+  if [[ "$(readlink -f "$DUCK")" == /snap/* || "$DUCK" == /snap/* ]]; then
+    echo "not using $DUCK (a snap: it may not reach $ROOT)"
+    DUCK=""
+  fi
+fi
 if [[ -z "$DUCK" ]]; then
   case "$(uname -s)/$(uname -m)" in
     Linux/x86_64) ARCH=amd64 ;;
