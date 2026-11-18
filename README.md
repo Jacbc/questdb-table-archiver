@@ -319,6 +319,18 @@ mode from its definition:
 group of tables out of a shared copy), `--start YYYY-MM` sets `start` on the
 chunked tables. Edit the config afterwards as you like.
 
+Backup directory on a NAS (SMB/CIFS share): mount it at boot first, then point
+the setup at the mount point. `mount-share.sh` adds the `/etc/fstab` line
+(mount on first use, `nofail`, files owned by you; a login is kept in a
+root-only file) and checks that you can write there:
+
+```bash
+sudo bash mount-share.sh //nas.local/backups /mnt/backups --user backup   # or --guest; --print to preview
+```
+
+On a share without file locks, a run warns and carries on: then make sure only
+one run uses the directory at a time.
+
 ```bash
 # back up what changed (run it by hand, or from cron on the backup machine)
 python3 qdb-backup.py run --config backup.json --root /backups/qdb --url http://questdb:9000
